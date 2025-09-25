@@ -1,28 +1,59 @@
-name: RDP Setup
+name: Start RDP Tunnel with ngrok
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-latest
+  rdp:
+    runs-on: self-hosted   # must be your own Windows machine runner
     steps:
-      - name: Download latest ngrok (v3)
-        run: |
-          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-          Expand-Archive ngrok.zip -DestinationPath $env:RUNNER_TEMP\ngrok
-          Copy-Item $env:RUNNER_TEMP\ngrok\ngrok.exe -Destination $env:RUNNER_TEMP\ngrok.exe
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Connect ngrok with Authtoken
+      - name: Install ngrok if missing
+        shell: powershell
         run: |
-          & $env:RUNNER_TEMP\ngrok.exe config add-authtoken "2gfnRM1BCVWfE3azlJufRg7vGCs_LR8dRZo7hLWj1czG5LAR"
+          $installDir = "C:\ngrok"
+          $ngrokExe = Join-Path $installDir "ngrok.exe"
+          if (-not (Test-Path $ngrokExe)) {
+            Write-Host "Downloading ngrok..."
+            Invoke-WebRequest -Uri https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+            Expand-Archive ngrok.zip -DestinationPath $installDir -Force
+            Remove-Item ngrok.zip
+          }
+          Write-Host "ngrok ready at $ngrokExe"
 
-      - name: Enable RDP
+      - name: Enable Remote Desktop
+        shell: powershell
         run: |
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          # Enable RDP in registry
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0 -Force
+          # Enable firewall rules
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: Start ngrok Tunnel
+      - name: Start ngrok TCP tunnel
+        shell: powershell
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
-          Start-Process -NoNewWindow -FilePath $env:RUNNER_TEMP\ngrok.exe -ArgumentList "tcp 3389"
-          Start-Sleep -Seconds 25
-          Invoke-WebRequest -Uri http://127.0.0.1:4040/api/tunnels | Select-Object -Expand Content
+          $installDir = "C:\ngrok"
+          $ngrokExe = Join-Path $installDir "ngrok.exe"
+
+          # Register token
+          & $ngrokExe authtoken $env:NGROK_AUTH_TOKEN
+
+          # Kill old ngrok if running
+          Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+          # Start ngrok TCP 3389 and capture output
+          Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389" -NoNewWindow -RedirectStandardOutput "C:\ngrok\ngrok.log"
+
+          Start-Sleep -Seconds 5
+
+          # Show endpoint in logs
+          $content = Get-Content "C:\ngrok\ngrok.log" -Tail 50
+          $endpoint = ($content | Select-String -Pattern "tcp://").ToString()
+          Write-Host "===================================="
+          Write-Host " Public RDP endpoint via ngrok:"
+          Write-Host " $endpoint"
+          Write-Host "===================================="
